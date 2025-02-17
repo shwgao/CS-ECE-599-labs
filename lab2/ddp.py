@@ -144,7 +144,7 @@ def ddp_setup(rank, world_size):
 
 
 def load_train_objs():
-    train_set = PokemonDataset('test', 'full')
+    train_set = PokemonDataset('train', 'full')
     
     # Load pretrained ResNet50
     model = models.resnet50()
@@ -171,6 +171,16 @@ def prepare_dataloader(dataset: Dataset, batch_size: int):
         shuffle=False,
         sampler=DistributedSampler(dataset)
     )
+
+
+def predict(model, test_data):
+    """
+    1. Load the model
+    2. Load the test data
+    3. Predict the test data
+    4. Return the predicted data
+    """
+    pass
 
 
 def main(rank: int, world_size: int, save_every: int, test_every: int, total_epochs: int, batch_size: int):
