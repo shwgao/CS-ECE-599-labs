@@ -1,2 +1,4 @@
 data/
-mnist_model.pth
+labs/
+*.pth
+*.pt
