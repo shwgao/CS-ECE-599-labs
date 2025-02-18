@@ -71,7 +71,9 @@ class Trainer:
         self.optimizer = optimizer
         self.save_every = save_every
         self.test_every = test_every
+        self.step_every = 10
         self.model = DDP(model, device_ids=[gpu_id])
+        self.accuracy = 0
 
     def _run_batch(self, source, targets):
         """Process a single batch of data"""
@@ -80,16 +82,20 @@ class Trainer:
         loss = F.cross_entropy(output, targets)
         loss.backward()
         self.optimizer.step()
-
+        return loss.item()
+    
     def _run_epoch(self, epoch):
         b_sz = len(next(iter(self.train_data))[0])
-        print(f"[GPU{self.gpu_id}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.train_data)}")
         self.train_data.sampler.set_epoch(epoch)
+        steps = 0
         for source, targets in self.train_data:
             source = source.to(self.gpu_id)
             targets = targets.to(self.gpu_id)
-            self._run_batch(source, targets)
-
+            loss = self._run_batch(source, targets)
+            if self.gpu_id == 0 and steps % self.step_every == 0:
+                print(f"[GPU{self.gpu_id}] Epoch {epoch} | Batchsize: {b_sz} | Steps:{steps}/{len(self.train_data)} | Loss: {loss:.4f} | Accuracy: {self.accuracy:.4f}")
+            steps += 1
+            
     def _save_checkpoint(self, epoch):
         ckp = self.model.module.state_dict()
         PATH = "checkpoint.pt"
@@ -119,12 +125,13 @@ class Trainer:
             start_time = time.time()
             self._run_epoch(epoch)
             end_time = time.time()
-            print(f"Epoch {epoch} took {end_time - start_time:.2f} seconds")
+            if self.gpu_id == 0:
+                print(f"Epoch {epoch} took {end_time - start_time:.2f} seconds")
             if self.gpu_id == 0 and epoch % self.save_every == 0:
                 self._save_checkpoint(epoch)
             if self.gpu_id == 0 and epoch % self.test_every == 0:
-                accuracy = self.measure_accuracy(self.train_data)
-                print(f"Epoch {epoch} | Accuracy: {accuracy:.2f}%")
+                self.accuracy = self.measure_accuracy(self.train_data)
+                # print(f"Epoch {epoch} | Accuracy: {accuracy:.2f}%")
 
 
 def ddp_setup(rank, world_size):
