@@ -2,3 +2,5 @@ data/
 labs/
 *.pth
 *.pt
+lab4/log
+lab4/data

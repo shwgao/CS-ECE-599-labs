@@ -115,7 +115,7 @@ def main():
     
     # Example input for the pipeline stage
     example_input_microbatch = (
-        torch.zeros(batch_size // n_microbatches, seq_length, dtype=torch.long),
+        torch.zeros(batch_size // n_microbatches, seq_length, dtype=torch.long, device=device),
     )
     
     # Determine the stage index for the current rank
@@ -140,7 +140,7 @@ def main():
                 del model.layers[str(layer_id)]
             # Ensure the input to this stage has the correct dimension
             example_input_microbatch = (
-                torch.zeros(batch_size // n_microbatches, seq_length, model_args.hidden_size, dtype=torch.float),
+                torch.zeros(batch_size // n_microbatches, seq_length, model_args.hidden_size, dtype=torch.float, device=device),
             )
             print(f"Stage {stage_index}: Initialized with second half of layers and output.")
     
