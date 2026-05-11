@@ -544,3 +544,296 @@ writer.add_image('filters/conv1', grid, global_step=NUM_EPOCHS)
 > "In the next lab we'll move to more advanced training scenarios — learning rate
 > scheduling and model checkpointing. TensorBoard will be our primary diagnostic tool,
 > so everything you learned today will be directly useful."
+
+---
+
+## Section 12 — PyTorch Profiler
+
+### 12.1 Introduction & Motivation
+
+**What to say:**
+
+> "So far we've been using TensorBoard to monitor *what* our model is learning —
+> loss curves, accuracy, weight distributions, embeddings.  Now we'll look at a
+> completely different question: *how efficiently* is our model running?"
+
+> "The PyTorch Profiler (`torch.profiler`) records the exact CPU and GPU time spent
+> on every single operator during a forward/backward pass.  It also tracks every
+> memory allocation and deallocation.  The results can be visualized in a dedicated
+> TensorBoard tab called **PYTORCH_PROFILER**."
+
+**Why profiling matters:**
+
+- A model that trains 2× faster is effectively like having 2× more compute budget.
+- Most inefficiencies are invisible to the naked eye — you need measurement data.
+- Common surprises: data loading is often the bottleneck on fast GPUs, not the model itself.
+- Profiling before optimizing prevents "premature optimization" — fixing things that
+  aren't actually slow.
+
+**Relation to TensorBoard:**
+
+> "The profiler integrates with TensorBoard through the `tensorboard_trace_handler`.
+> This writes a Chrome Trace JSON file that the `torch_tb_profiler` plugin parses
+> and renders as interactive flame graphs, tables, and memory timelines.
+> The same `tensorboard --logdir=...` workflow applies."
+
+### 12.2 Install the Plugin
+
+**What to say:**
+
+> "The profiler itself ships with PyTorch — `import torch.profiler` just works.
+> The *TensorBoard visualization* requires one extra package: `torch_tb_profiler`.
+> One pip install and you're done."
+
+**Instructor note:** The verification cell (`try: import torch_tb_profiler`) is there
+as a gentle guard. On a shared cluster the package might not be installed system-wide.
+Students may need `pip install --user torch_tb_profiler`.
+
+### 12.3 Profile Schedule
+
+**What to say:**
+
+> "You don't want to profile every single training step — that would add significant
+> overhead to an already slow training loop.  The `schedule` parameter defines a
+> repeating pattern: skip a few steps, warm up, then record for a fixed number of
+> active steps."
+
+**Walk through the four phases with a concrete analogy:**
+
+> "Think of it like a photographer at a sporting event.  The `wait` phase is them
+> getting into position — they're present but not shooting.  The `warmup` phase is
+> taking test shots to calibrate exposure — the pictures get deleted.  The `active`
+> phase is the real shoot — every frame is saved.  `repeat` says how many times to
+> run this cycle before stopping."
+
+**Number the steps aloud:**
+
+With `wait=1, warmup=1, active=3, repeat=1`:
+- Step 0 → wait (profiler is idle)
+- Step 1 → warmup (profiler runs but discards data — warms up JIT/cuDNN)
+- Steps 2, 3, 4 → active (3 steps of real trace data collected)
+- Step 5 → profiler stops
+
+> "So we need to feed at least `wait + warmup + active = 5` batches through the loop.
+> We use `if step >= WAIT + WARMUP + ACTIVE - 1: break` to stop exactly on time."
+
+**`prof.step()` placement:**
+
+> "This is the #1 mistake students make: calling `prof.step()` at the *start* instead
+> of the *end* of the training step.  `prof.step()` signals to the profiler that the
+> current step is complete and it should advance its state machine.  Always call it
+> **after** `optimizer.step()`."
+
+### 12.4 Running the Profiler (Code Walkthrough)
+
+**Walk through the code cell line by line:**
+
+1. `PROF_LOG_DIR = 'log/simplecnn_profiler'` — dedicated subdirectory, separate from
+   the TensorBoard scalar logs in `runs/`.
+2. `net_prof = SimpleCNN().to(device)` — fresh model, no prior training state.
+3. `train_step(inputs, targets)` — standard forward/backward/step; nothing special.
+4. `with torch.profiler.profile(...) as prof:` — the context manager starts recording.
+5. `on_trace_ready=torch.profiler.tensorboard_trace_handler(PROF_LOG_DIR)` — automatically
+   writes a `.pt.trace.json` file when the active phase ends.
+6. `record_shapes=True` — attaches tensor shapes to each operator entry (slows down
+   profiling slightly but invaluable for debugging).
+7. `profile_memory=True` — tracks every `malloc`/`free` in the PyTorch allocator.
+8. `with_stack=True` — captures Python call stacks; enables the stack view in TensorBoard.
+   *Significant overhead on CPU — consider disabling for large models.*
+
+**What to show while it runs:**
+
+- The loop only runs `WAIT + WARMUP + ACTIVE = 5` batches — very fast.
+- Point out the `prof.step()` call at the end of the loop body.
+- After the `with` block exits, the trace file is flushed automatically.
+
+### 12.5 Navigating the PYTORCH_PROFILER Panel
+
+**Walk students through the TensorBoard UI (share screen):**
+
+1. **Launch TensorBoard:**
+   ```
+   tensorboard --logdir=log/simplecnn_profiler
+   ```
+2. Click the **PYTORCH_PROFILER** tab (it may take 5–10 seconds to appear while
+   the plugin parses the trace).
+
+**Overview tab:**
+
+> "The Overview is a wall-clock pie chart. It shows what fraction of time was spent
+> in computation, data loading, and idle waiting.  On a CPU-only machine you'll see
+> very little idle.  On a GPU machine with slow data loading, you'd see a large
+> 'DataLoader' slice — that's your first optimization target."
+
+**Operator tab:**
+
+> "This is a ranked table of every PyTorch operator.  The key columns are:
+> - **Self CPU %** — time spent *inside* this op (not counting child ops)
+> - **CPU total** — total time including all called sub-ops
+> - **# Calls** — how many times this op was invoked in the profiled steps"
+>
+> "Look for the top 3–5 operators by Self CPU %.  For our CNN on CPU, you'll likely
+> see `conv2d`, `batch_norm`, and `max_pool2d` near the top.  That's expected —
+> convolutions dominate CNN computation."
+
+**Trace tab (flame graph):**
+
+> "This is a horizontal timeline.  Each row is a thread.  Each block is one operator
+> call.  The x-axis is real wall-clock time.  Zoom in with scroll wheel; pan with drag."
+>
+> "You can see the forward pass and the backward pass as two distinct clusters.
+> Hover over a block to see its exact duration.  For GPU runs, you'd also see a
+> second row showing CUDA kernel launches."
+
+**Memory tab:**
+
+> "If you enabled `profile_memory=True`, the Memory tab shows a timeline of memory
+> usage.  The y-axis is bytes; the x-axis is time.  Look for sudden spikes — those
+> are large intermediate tensors created during the forward pass.
+> The backward pass mirror the forward: gradients are allocated in reverse order."
+
+**Module tab:**
+
+> "The Module tab maps profiling data back to your `nn.Module` hierarchy.
+> `SimpleCNN.features` vs `SimpleCNN.classifier` — you can see how time splits
+> between the convolutional backbone and the FC layers."
+
+### 12.6 Console Output (`key_averages`)
+
+**What to say:**
+
+> "You don't always have TensorBoard handy.  `prof.key_averages().table()` prints
+> a human-readable operator table right in the notebook output.
+> This is useful for quick checks without launching a browser."
+
+**Three variants demonstrated:**
+
+1. `sort_by='cpu_time_total'` — total time including sub-ops; good for finding
+   which *operation* takes the most end-to-end time.
+2. `sort_by='self_cpu_time_total'` — time in the op itself; good for finding
+   which *implementation* is the actual bottleneck.
+3. `group_by_input_shape=True` — groups results by the shape of input tensors;
+   useful for spotting shape mismatches that cause sub-optimal kernel selection.
+
+**Sample output to show (or draw on board):**
+
+```
+Name                    Self CPU %  CPU total  CPU time avg  # of Calls
+---------------------------------------------------------------------------
+aten::convolution           45.2%    52.1ms        17.4ms           3
+aten::batch_norm             8.3%     9.6ms         3.2ms           3
+aten::max_pool2d             6.1%     7.1ms         2.4ms           3
+aten::mm (FC layers)         5.7%     6.6ms         3.3ms           2
+...
+```
+
+### 12.7 Performance Tuning Tips (Table Discussion)
+
+**What to say:**
+
+> "Now that we can *measure* performance, let's talk about what to *do* about it."
+
+**Walk through the table row by row:**
+
+1. **DataLoader bottleneck** — "If your GPU finishes a batch before the CPU has loaded
+   the next one, your GPU is idle.  Increasing `num_workers` uses separate processes
+   to prefetch data.  `pin_memory=True` avoids an extra CPU-RAM copy for CUDA tensors."
+
+2. **CPU-GPU sync** — "Every time Python calls `.item()` on a GPU tensor, it forces
+   a CPU-GPU sync — the CPU waits for the GPU to finish.  Minimize `.item()` calls
+   inside training loops.  Also, mixed-precision training (`torch.cuda.amp`) halves
+   memory bandwidth for most ops."
+
+3. **Many small ops** — "If you see hundreds of tiny ops in the flame graph,
+   consider fusing them.  `torch.compile()` (PyTorch 2.0+) automatically fuses
+   element-wise ops into efficient kernels."
+
+4. **Memory fragmentation** — "Lots of small allocations can fragment the allocator.
+   If possible, pre-allocate output buffers and reuse them with the `out=` parameter."
+
+5. **Conv2d dominates (expected)** — "For our CNN this is normal — CNNs are supposed
+   to spend most time in convolutions.  To make convs faster, enable
+   `torch.backends.cudnn.benchmark = True` on a CUDA machine.  This runs a few
+   calibration steps to pick the fastest algorithm for your specific input shapes."
+
+**Live experiment (optional, 3 minutes):**
+
+> "Let's try the quickest win right now.  Change `num_workers=2` to `num_workers=4`
+> in the DataLoader at the top of the notebook, re-run the profiler, and check
+> whether the DataLoader slice in the Overview tab shrinks."
+
+---
+
+## Section 13 — Updated Summary
+
+**What to say:**
+
+> "We've added the Profiler to the coverage checklist.  The mental model now is:
+> - TensorBoard `SummaryWriter` tells you *what* is happening (loss, accuracy, features)
+> - PyTorch Profiler tells you *how efficiently* it's happening (time, memory, kernels)"
+
+---
+
+## Section 14 — Practice Exercises (Exercise 6)
+
+**Exercise 6 guidance:**
+
+> "This exercise asks you to profile two different architectures and compare them.
+> `SimpleCNN` is shallow and fast; ResNet-18 has skip connections and 18 layers.
+> The profiler will show you *exactly* where the extra time goes."
+
+**Expected findings students should observe:**
+
+- ResNet-18 will have many more `aten::add` operations (skip connections).
+- ResNet-18 will use more peak memory (more feature maps).
+- Both will show `DataLoader` as a meaningful fraction on CPU — the bonus task of
+  enabling `num_workers=4` should visibly reduce this fraction.
+
+**Hint for the bonus task:**
+
+```python
+# Change in Section 1.2:
+trainloader = DataLoader(trainset, batch_size=128, shuffle=True,
+                         num_workers=4, pin_memory=True)
+```
+
+Then re-run the profiler cell and compare the **Overview** tab before/after.
+
+---
+
+## General Q&A — Profiler-Specific Questions
+
+**Q: Does `with_stack=True` work on all platforms?**
+
+> "Yes, but it adds significant overhead on CPU (Python stack unwinding is slow).
+> On GPU machines the overhead is proportionally smaller.  For quick profiling
+> runs you can omit it; only use it when you need to trace back an expensive
+> operator to a specific line in your Python code."
+
+**Q: Can I profile only the forward pass, not the backward?**
+
+> "Yes — just don't call `loss.backward()` inside the profiled steps.
+> Or, use `torch.profiler.record_function('forward')` as a context manager to
+> label specific code blocks and filter them in the flame graph."
+
+**Q: How do I profile a model on a multi-GPU setup?**
+
+> "Use `dist.barrier()` to synchronize before profiling, then have each rank write
+> to its own sub-directory: `tensorboard_trace_handler(f'log/rank_{rank}')`.
+> TensorBoard's PYTORCH_PROFILER plugin can display all ranks side by side and
+> highlight imbalances between them."
+
+**Q: What's the difference between `self_cpu_time_total` and `cpu_time_total`?**
+
+> "`cpu_time_total` includes time spent in all child operations (the full subtree
+> below this node in the operator graph).  `self_cpu_time_total` subtracts child
+> time — it's the time the implementation of *this* operator spent, ignoring what
+> it delegates.  Use `self` time to find the actual hotspot; use `total` time to
+> understand the overall impact of a high-level operation."
+
+**Q: The PYTORCH_PROFILER tab doesn't appear in TensorBoard. What's wrong?**
+
+> "Most likely `torch_tb_profiler` is not installed in the Python environment that
+> TensorBoard is running from.  Run `pip install torch_tb_profiler` in the same
+> environment, restart TensorBoard, and refresh the browser.  Also double-check
+> that the `log/simplecnn_profiler` directory contains a `.pt.trace.json` file."
